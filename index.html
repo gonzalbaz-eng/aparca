@@ -99,6 +99,26 @@ async function esri(url){
   return j;
 }
 
+/* ---------- Condiciones de la ORA ----------
+   Plazas por zona: inventario a 31/12/2015 (Proyecto de explotación ORA, 2016).
+   Horario: Ordenanza de Aparcamientos Limitados nº 45 (última modificación 2004).
+   Tarifas: pendientes (Ordenanza fiscal vigente, apartado 15.1). */
+const ORA_PLAZAS = {"1":180,"2":586,"3":1255,"4":1017,"5":1259,"6":790,"7":634,"8":929,"9":541};
+/* Horario, tarifas y reglas: valladolidora.com (concesionaria, consultado nov. 2026) */
+const ORA_HORARIO = "Lun–vie 9:00–14:00 y 16:30–20:00 · Sáb 9:00–14:00 · Sáb tarde, domingos y festivos: gratis";
+const AVISO = "<br><small>Pago en parquímetro o app Telpark. Un tique sacado fuera de horario empieza a contar al reanudarse el servicio. Fuente: valladolidora.com</small>";
+const TIPOS = {
+  azul:      {nom:"Zona azul", txt:"0,70 € la hora · máximo 2 h (2,35 €). Si te pasas: anulación 2,25 € (≤30 min) o 4,35 € (≤60 min)."},
+  altaRot:   {nom:"Zona naranja (alta rotación)", txt:"Máximo 1 h (1,40 €). Si te pasas: anulación 4,35 € (≤30 min). El tique naranja vale en azul, pero no al revés."},
+  residentes:{nom:"Exclusivo residentes", txt:"Solo vehículos con autorización de residente de la zona. No apto para visitantes."},
+  disuasorio:{nom:"Disuasorio urbano (ADU)", txt:"Sin límite de tiempo · 0,30 € la hora, 1,30 € mañana o tarde, 2,60 € el día. Durante eventos en la Feria: 10:00–21:00 todos los días, tarifa doble."}
+};
+function popupORA(z){
+  const pl = ORA_PLAZAS[String(z).trim()];
+  return "<b>ORA · zona "+z+"</b>"+(pl?"<br>"+pl+" plazas reguladas <small>(inventario 2015)</small>":"")+
+    "<br>"+TIPOS.azul.nom+": "+TIPOS.azul.txt+"<br>Horario: "+ORA_HORARIO+AVISO;
+}
+
 /* ---------- Capa de regímenes de parquímetro ---------- */
 const ORA_COLORS = ["#d9822b","#2b8cd9","#c23b6e","#4aa36a","#8a5bd1","#b59b1f","#2aa3a3","#d94f2b","#6b7a8f"];
 async function cargarORA(){
@@ -110,15 +130,16 @@ async function cargarORA(){
         const z = f.properties.ZONA || "?";
         if(!(z in zonas)) zonas[z] = ORA_COLORS[Object.keys(zonas).length % ORA_COLORS.length];
         return {color:zonas[z],weight:1.5,fillOpacity:.25};
-      }, onEachFeature:(f,l)=>l.bindPopup("<b>ORA · zona "+(f.properties.ZONA||"?")+"</b><br>Condiciones: pendiente de cargar desde la ordenanza")}).addTo(oraLayer);
+      }, onEachFeature:(f,l)=>l.bindPopup(popupORA(f.properties.ZONA||"?"))}).addTo(oraLayer);
       n += g.features.length;
     }
-    const extras = [[SRC.altaRot,"Alta rotación","#c0392b"],[SRC.residentes,"Exclusivo residentes","#2e7d32"],[SRC.disuasorio,"Disuasorio (gratuito)","#455a64"]];
-    for(const [u,nom,col] of extras){
+    const extras = [[SRC.altaRot,"altaRot","#c0392b"],[SRC.residentes,"residentes","#2e7d32"],[SRC.disuasorio,"disuasorio","#455a64"]];
+    for(const [u,tipo,col] of extras){
       try{
         const g = await esri(u);
+        const t = TIPOS[tipo];
         L.geoJSON(g,{style:{color:col,weight:2,fillOpacity:.35},pointToLayer:(f,ll)=>L.circleMarker(ll,{radius:6,color:col}),
-          onEachFeature:(f,l)=>l.bindPopup("<b>"+nom+"</b>")}).addTo(oraLayer);
+          onEachFeature:(f,l)=>l.bindPopup("<b>"+t.nom+"</b><br>"+t.txt+(tipo!=="residentes"?"<br>Horario: "+ORA_HORARIO:"")+AVISO)}).addTo(oraLayer);
         n += g.features.length;
       }catch(e){}
     }
@@ -171,11 +192,19 @@ async function cargarParkings(){
   }
   try{ osm = await osmParkings(); }catch(e){ setStatus("osm","OpenStreetMap no disponible"); }
 
-  // Capacidad: se toma de OSM si hay un aparcamiento a menos de 80 m del punto municipal
+  // Capacidad 1: parkings.json del repositorio (tiene prioridad). Se casa por nombre municipal.
+  let tabla = [];
+  try{ const r = await fetch("parkings.json",{cache:"no-store"}); if(r.ok) tabla = await r.json(); }catch(e){}
+  const norm = s=>(s||"").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").trim();
+  // Capacidad 2: OSM, si hay un aparcamiento a menos de 80 m del punto municipal
   ayto.forEach(p=>{
     const m = osm.filter(o=>o.cap).map(o=>[o,dist(p.ll,o.ll)]).filter(x=>x[1]<80).sort((a,b)=>a[1]-b[1])[0];
-    if(m){ p.cap=m[0].cap; m[0].usado=true; }
+    if(m){ p.cap=m[0].cap; p.fuenteCap="OpenStreetMap"; m[0].usado=true; }
+    else { const o = osm.map(o=>[o,dist(p.ll,o.ll)]).filter(x=>x[1]<80)[0]; if(o) o[0].usado=true; }
+    const t = tabla.find(t=>norm(t.nombre)===norm(p.nombre));
+    if(t && t.plazas!=null){ p.cap=t.plazas; p.fuenteCap=t.fuente||"tabla propia"; }
   });
+  osm.forEach(o=>{ if(o.cap!=null) o.fuenteCap="OpenStreetMap"; });
   // Parkings de OSM cerrados (subterráneos o en altura) que no están en la capa municipal
   const extraOsm = osm.filter(o=>!o.usado && /underground|multi-storey/.test(o.tipo)
     && !ayto.some(p=>dist(p.ll,o.ll)<80));
@@ -187,7 +216,7 @@ async function cargarParkings(){
     L.marker(p.ll,{icon:icono(p.cap, lib)}).bindPopup(
       "<b>"+p.nombre+"</b>"+(p.sit?"<br>"+p.sit:"")+
       (lib!=null?"<br>Plazas libres: <b>"+lib+"</b>":"")+
-      (p.cap!=null?"<br>Plazas totales: "+p.cap:"<br>Plazas totales: sin dato")+
+      (p.cap!=null?"<br>Plazas totales: "+p.cap+" <small>("+p.fuenteCap+")</small>":"<br>Plazas totales: sin dato")+
       (p.horario?"<br>Horario: "+p.horario:"")+
       "<br><small>Fuente: "+(p.sit!==undefined?"Ayto. de Valladolid":"OpenStreetMap")+"</small>"
     ).addTo(parkLayer);
