@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aparca Valladolid</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+/* Mapa a pantalla completa; barra de botones flotante arriba, estado abajo */
+:root{
+  --ink:#1d2430; --paper:#ffffff; --line:#c9d1dc;
+  --p-blue:#1f5fbf;     /* plazas totales */
+  --p-green:#1f8a4c;    /* plazas libres */
+  --zbe:#7a3fb0;        /* ZBE */
+  --ora:#d9822b;        /* regulación de parquímetro */
+  --font:"Roboto Condensed", system-ui, sans-serif;
+}
+html,body{height:100%;margin:0}
+body{font-family:var(--font);color:var(--ink);background:var(--paper)}
+#map{position:absolute;inset:0}
+.bar{position:absolute;z-index:1000;top:calc(10px + env(safe-area-inset-top,0px));
+  left:max(56px, calc(env(safe-area-inset-left,0px) + 56px)); right:max(10px, env(safe-area-inset-right,0px));
+  display:flex;gap:8px;flex-wrap:wrap}
+.tg{appearance:none;border:2px solid var(--c);background:var(--paper);color:var(--c);
+  font:600 15px var(--font);padding:8px 14px;border-radius:999px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.tg[aria-pressed="true"]{background:var(--c);color:#fff}
+.tg:focus-visible{outline:3px solid #000;outline-offset:2px}
+#zbeBtn{--c:var(--zbe)} #oraBtn{--c:var(--ora)}
+.status{position:absolute;z-index:1000;left:max(10px,env(safe-area-inset-left,0px));right:max(10px,env(safe-area-inset-right,0px));
+  bottom:calc(24px + env(safe-area-inset-bottom,0px));font-size:12px;background:rgba(255,255,255,.92);
+  border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-width:520px}
+/* Símbolo de parking */
+.pk{display:flex;align-items:center;gap:2px;white-space:nowrap}
+.pk b{display:grid;place-items:center;width:22px;height:22px;border-radius:4px;background:var(--p-blue);
+  color:#fff;font:700 15px/1 var(--font);border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.pk span{font:700 13px/1 var(--font);padding:3px 5px;border-radius:4px;background:#fff;border:1px solid currentColor}
+.pk .tot{color:var(--p-blue)} .pk .lib{color:var(--p-green)}
+.leaflet-popup-content{font-family:var(--font);font-size:13px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="bar">
+  <button id="zbeBtn" class="tg" aria-pressed="false">ZBE</button>
+  <button id="oraBtn" class="tg" aria-pressed="false">Parquímetro</button>
+</div>
+<div class="status" id="status">Cargando datos…</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/* ---------- Fuentes ---------- */
+const AYTO = "https://www10.ava.es/arcgisva/rest/services/CallejeroVA";
+const SRC = {
+  parkings:   AYTO + "/PlanoMovilidad_Tematico/MapServer/72",   // puntos "Parking" (DENOMINACIÓN, SITUACION)
+  ora:        [AYTO + "/PlanoMovilidad_Base/MapServer/73", AYTO + "/PlanoMovilidad_Base/MapServer/74"], // Zonas ORA (campo ZONA)
+  altaRot:    AYTO + "/PlanoMovilidad_Base/MapServer/72",
+  residentes: AYTO + "/PlanoMovilidad_Base/MapServer/69",
+  disuasorio: AYTO + "/PlanoMovilidad_Base/MapServer/67",
+  overpass:   "https://overpass-api.de/api/interpreter"
+};
+
+/* ZBE de Valladolid: polígono publicado por la DGT en el NAP (DATEX II v3, Valladolid.xml) */
+const ZBE_LATLON = [[41.656425,-4.73165],[41.655193,-4.7318673],[41.65376,-4.732084],[41.653248,-4.7321],[41.652866,-4.7322154],[41.652393,-4.7322793],[41.652058,-4.7322664],[41.651463,-4.732432],[41.650623,-4.7324877],[41.649628,-4.732749],[41.64923,-4.7302794],[41.64817,-4.7300134],[41.648293,-4.7295957],[41.64843,-4.7284336],[41.648403,-4.728248],[41.64868,-4.725965],[41.64876,-4.725565],[41.64883,-4.7244506],[41.648495,-4.724218],[41.64853,-4.724108],[41.647896,-4.722329],[41.647602,-4.721985],[41.64724,-4.7220287],[41.647095,-4.72069],[41.64772,-4.7206435],[41.648384,-4.7206626],[41.64949,-4.7208066],[41.65047,-4.720887],[41.6506,-4.72031],[41.650814,-4.720456],[41.651077,-4.719987],[41.65196,-4.718625],[41.65228,-4.71829],[41.654068,-4.7178154],[41.654224,-4.718389],[41.6546,-4.7194204],[41.6547,-4.71952],[41.65562,-4.7201757],[41.65662,-4.720922],[41.657223,-4.7196326],[41.657875,-4.7216415],[41.658215,-4.722494],[41.658546,-4.7239103],[41.65882,-4.725022],[41.658825,-4.7251377],[41.658764,-4.725313],[41.65745,-4.7255926],[41.65721,-4.7256722],[41.65686,-4.725923],[41.657124,-4.726726],[41.65711,-4.7279115],[41.656956,-4.7293053],[41.656647,-4.731443]];
+const ZBE_TXT = "Acceso: etiqueta B (hasta 31/12/2027), C (hasta 01/01/2030), ECO, 0 y autorizados. Sin distintivo: prohibido. Todos los días, 24 h. Más información: zbe.valladolid.es";
+
+/* Hook para plazas libres en tiempo real: devuelve {nombreParking: libres}.
+   Hoy no hay fuente abierta para Valladolid; cuando exista (p. ej. NAP DGT
+   "Estado de ocupación de parkings en Ayuntamientos"), se implementa aquí. */
+async function cargarLibres(){ return {}; }
+
+/* ---------- Mapa ---------- */
+const map = L.map("map",{zoomControl:true}).setView([41.6522,-4.7245],15);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,
+  attribution:'© OpenStreetMap · Ayto. de Valladolid · DGT NAP'}).addTo(map);
+
+const zbeLayer = L.polygon(ZBE_LATLON,{color:"#7a3fb0",weight:3,fillOpacity:.12,dashArray:"6 4"})
+  .bindPopup("<b>Zona de Bajas Emisiones</b><br>"+ZBE_TXT);
+const oraLayer = L.layerGroup();
+const parkLayer = L.layerGroup().addTo(map);
+const status = document.getElementById("status");
+const msgs = {};
+function setStatus(k,v){ msgs[k]=v; status.textContent = Object.values(msgs).join(" · "); }
+
+function toggle(btn, layer){
+  btn.addEventListener("click",()=>{
+    const on = btn.getAttribute("aria-pressed")!=="true";
+    btn.setAttribute("aria-pressed", on);
+    on ? layer.addTo(map) : map.removeLayer(layer);
+  });
+}
+toggle(document.getElementById("zbeBtn"), zbeLayer);
+toggle(document.getElementById("oraBtn"), oraLayer);
+
+/* Consulta GeoJSON a un layer de ArcGIS Server */
+async function esri(url){
+  const q = url + "/query?where=1%3D1&outFields=*&outSR=4326&f=geojson";
+  const r = await fetch(q); if(!r.ok) throw new Error(r.status);
+  const j = await r.json(); if(j.error) throw new Error(j.error.message);
+  return j;
+}
+
+/* ---------- Capa de regímenes de parquímetro ---------- */
+const ORA_COLORS = ["#d9822b","#2b8cd9","#c23b6e","#4aa36a","#8a5bd1","#b59b1f","#2aa3a3","#d94f2b","#6b7a8f"];
+async function cargarORA(){
+  const zonas = {}; let n = 0;
+  try{
+    for(const u of SRC.ora){
+      const g = await esri(u);
+      L.geoJSON(g,{style:f=>{
+        const z = f.properties.ZONA || "?";
+        if(!(z in zonas)) zonas[z] = ORA_COLORS[Object.keys(zonas).length % ORA_COLORS.length];
+        return {color:zonas[z],weight:1.5,fillOpacity:.25};
+      }, onEachFeature:(f,l)=>l.bindPopup("<b>ORA · zona "+(f.properties.ZONA||"?")+"</b><br>Condiciones: pendiente de cargar desde la ordenanza")}).addTo(oraLayer);
+      n += g.features.length;
+    }
+    const extras = [[SRC.altaRot,"Alta rotación","#c0392b"],[SRC.residentes,"Exclusivo residentes","#2e7d32"],[SRC.disuasorio,"Disuasorio (gratuito)","#455a64"]];
+    for(const [u,nom,col] of extras){
+      try{
+        const g = await esri(u);
+        L.geoJSON(g,{style:{color:col,weight:2,fillOpacity:.35},pointToLayer:(f,ll)=>L.circleMarker(ll,{radius:6,color:col}),
+          onEachFeature:(f,l)=>l.bindPopup("<b>"+nom+"</b>")}).addTo(oraLayer);
+        n += g.features.length;
+      }catch(e){}
+    }
+    setStatus("ora", n+" elementos de parquímetro");
+  }catch(e){
+    /* Si el navegador bloquea la consulta (CORS), se pinta como imagen WMS */
+    L.tileLayer.wms(AYTO.replace("/rest/services","/services")+"/PlanoMovilidad_Base/MapServer/WMSServer",
+      {layers:"73,74,72,69,67",format:"image/png",transparent:true,opacity:.7}).addTo(oraLayer);
+    setStatus("ora","parquímetro como imagen (sin consulta vectorial)");
+  }
+}
+
+/* ---------- Parkings ---------- */
+function icono(total, libres){
+  let extra = "";
+  if(libres!=null) extra = '<span class="lib">'+libres+'</span>';
+  else if(total!=null) extra = '<span class="tot">'+total+'</span>';
+  return L.divIcon({className:"",html:'<div class="pk"><b>P</b>'+extra+'</div>',iconSize:null,iconAnchor:[11,11]});
+}
+function dist(a,b){ const R=6371000,toR=Math.PI/180;
+  const dLat=(b[0]-a[0])*toR,dLon=(b[1]-a[1])*toR;
+  const s=Math.sin(dLat/2)**2+Math.cos(a[0]*toR)*Math.cos(b[0]*toR)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s)); }
+
+async function osmParkings(){
+  const q = '[out:json][timeout:25];(nwr["amenity"="parking"]["access"!~"private|customers"](41.62,-4.78,41.68,-4.68););out center tags;';
+  const r = await fetch(SRC.overpass,{method:"POST",body:"data="+encodeURIComponent(q)});
+  const j = await r.json();
+  return j.elements.map(e=>({
+    ll:[e.lat??e.center.lat, e.lon??e.center.lon],
+    nombre:e.tags.name||"Aparcamiento",
+    tipo:e.tags.parking||"", cap:e.tags.capacity?parseInt(e.tags.capacity,10):null,
+    fee:e.tags.fee||"", horario:e.tags.opening_hours||""
+  }));
+}
+
+async function cargarParkings(){
+  let ayto = [], osm = [];
+  try{
+    const g = await esri(SRC.parkings);
+    g.features.forEach(f=>{
+      const c = f.geometry.type==="MultiPoint" ? f.geometry.coordinates[0] : f.geometry.coordinates;
+      ayto.push({ll:[c[1],c[0]], nombre:f.properties["DENOMINACIÓN"]||"Parking", sit:f.properties.SITUACION||"", cap:null});
+    });
+  }catch(e){
+    // Sin consulta vectorial (CORS): se muestran los parkings municipales como imagen WMS
+    L.tileLayer.wms(AYTO.replace("/rest/services","/services")+"/PlanoMovilidad_Tematico/MapServer/WMSServer",
+      {layers:"72",format:"image/png",transparent:true}).addTo(parkLayer);
+    setStatus("pa","parkings municipales como imagen (sin consulta vectorial)");
+  }
+  try{ osm = await osmParkings(); }catch(e){ setStatus("osm","OpenStreetMap no disponible"); }
+
+  // Capacidad: se toma de OSM si hay un aparcamiento a menos de 80 m del punto municipal
+  ayto.forEach(p=>{
+    const m = osm.filter(o=>o.cap).map(o=>[o,dist(p.ll,o.ll)]).filter(x=>x[1]<80).sort((a,b)=>a[1]-b[1])[0];
+    if(m){ p.cap=m[0].cap; m[0].usado=true; }
+  });
+  // Parkings de OSM cerrados (subterráneos o en altura) que no están en la capa municipal
+  const extraOsm = osm.filter(o=>!o.usado && /underground|multi-storey/.test(o.tipo)
+    && !ayto.some(p=>dist(p.ll,o.ll)<80));
+  const todos = ayto.concat(extraOsm);
+
+  const libres = await cargarLibres();
+  todos.forEach(p=>{
+    const lib = libres[p.nombre] ?? null;
+    L.marker(p.ll,{icon:icono(p.cap, lib)}).bindPopup(
+      "<b>"+p.nombre+"</b>"+(p.sit?"<br>"+p.sit:"")+
+      (lib!=null?"<br>Plazas libres: <b>"+lib+"</b>":"")+
+      (p.cap!=null?"<br>Plazas totales: "+p.cap:"<br>Plazas totales: sin dato")+
+      (p.horario?"<br>Horario: "+p.horario:"")+
+      "<br><small>Fuente: "+(p.sit!==undefined?"Ayto. de Valladolid":"OpenStreetMap")+"</small>"
+    ).addTo(parkLayer);
+  });
+  setStatus("pk", todos.length+" parkings ("+todos.filter(p=>p.cap!=null).length+" con nº de plazas)");
+}
+
+cargarParkings(); cargarORA();
+</script>
+</body>
+</html>
